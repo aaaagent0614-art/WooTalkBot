@@ -37,7 +37,10 @@ def fresh_session():
     cj = http.cookiejar.CookieJar()
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     op.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")]
-    op.open(HOME)
+    try:
+        op.open(HOME, timeout=10)
+    except Exception:
+        return None
     for c in cj:
         if c.name == "_wootalk_session":
             return c.value
@@ -111,7 +114,7 @@ class WooCore:
         self.match_mode = settings.get("match_mode", "contains")
         self.max_check = int(settings.get("max_check", 3))
         self.leave_delay_max = max(1.0, float(settings.get("leave_delay_max", 5.0)))
-        self.session = fresh_session()          # 啟動時拿一次，之後復用（模擬正常瀏覽器）
+        self.session = None          # 在背景 thread 裡第一次拿，避免 HTTP 阻塞 GUI
         self.round = 0
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -285,7 +288,9 @@ class WooCore:
         sess = self.session or fresh_session()
         self.session = sess
         if not sess:
-            self.log(("system", "⚠️ 拿不到 session cookie，稍後重試"))
+            self.log(("leave", "⚠️ wootalk 網站疑似掛了（拿不到 session cookie）"))
+            self.log(("system", "已停止配對。等網站恢復後再按「▶ 開始配對」"))
+            self.running = False
             return
         headers = {"Origin": HOME.rstrip("/"), "Cookie": f"_wootalk_session={sess}"}
         async with websockets.connect(WSS, origin=HOME.rstrip("/"),
