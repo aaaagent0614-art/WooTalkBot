@@ -246,6 +246,41 @@ class WooCore:
                         return
                     self.log(("them", text))
 
+    def _http_check(self):
+        """檢查 wootalk 是否正常：能拿到 _wootalk_session cookie 就代表正常。
+        維護中時 wootalk 回維護頁、不發 session cookie（實測確認）。"""
+        cj = http.cookiejar.CookieJar()
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        op.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")]
+        try:
+            op.open(HOME, timeout=10)
+        except Exception:
+            return "down"
+        for c in cj:
+            if c.name == "_wootalk_session":
+                return "up"
+        return "down"
+
+    async def _match_timeout(self, seconds):
+        """配對超過 seconds 秒仍無結果 → 檢查網站狀態。"""
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            return
+        if self.matched or not self.running:
+            return
+        status = await asyncio.to_thread(self._http_check)
+        if status == "down":
+            self.log(("leave", "⚠️ wootalk 網站疑似掛了（配對超過 10 秒無回應）"))
+            self.log(("system", "已停止配對。等網站恢復後再按「▶ 開始配對」"))
+            self.running = False
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+        else:
+            self.log(("system", "🔎 配對超過 10 秒，網站正常（可能人少），繼續等待…"))
+
     async def _round(self):
         sess = self.session or fresh_session()
         self.session = sess
@@ -256,16 +291,20 @@ class WooCore:
         async with websockets.connect(WSS, origin=HOME.rstrip("/"),
                                       additional_headers=headers) as ws:
             self.ws = ws
-            async for raw in ws:
-                if not self.running:
-                    return
-                try:
-                    batch = json.loads(raw)
-                except Exception:
-                    continue
-                evs = batch if isinstance(batch, list) and batch and isinstance(batch[0], list) else [batch]
-                for ev in evs:
-                    await self._handle(ev)
+            timeout_task = asyncio.create_task(self._match_timeout(10))
+            try:
+                async for raw in ws:
+                    if not self.running:
+                        return
+                    try:
+                        batch = json.loads(raw)
+                    except Exception:
+                        continue
+                    evs = batch if isinstance(batch, list) and batch and isinstance(batch[0], list) else [batch]
+                    for ev in evs:
+                        await self._handle(ev)
+            finally:
+                timeout_task.cancel()
 
     async def _main(self):
         while self.running:
