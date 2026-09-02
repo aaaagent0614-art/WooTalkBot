@@ -216,8 +216,9 @@ class WooCore:
                                 self.log(("system", "已自動開瀏覽器"))
                             except Exception:
                                 self.log(("system", "請手動複製上面的連結開瀏覽器"))
-                        self.log(("system", "驗證流程：勾我不是機器人 → 等倒數 → 按我同意 → 回原分頁重整"))
-                        self.log(("system", "⏸ 配對已暫停。驗證完成後，回 app 按「▶ 開始配對」繼續"))
+                        self.log(("system", "⚠️ 驗證綁定 IP，app 與瀏覽器 session 不同，驗證通常無效"))
+                        self.log(("system", "建議：開 VPN 換 IP，再按「▶ 開始配對」重試"))
+                        self.log(("system", "⏸ 配對已暫停"))
                         self.matched = False
                         self.running = False          # 完全停止，不再自動重連
                         await self.ws.close()
