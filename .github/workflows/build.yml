@@ -1,0 +1,49 @@
+# Build the Windows standalone .exe on a GitHub Actions Windows runner and
+# attach it to the release. Triggered by pushing a tag like v1.0.0, or
+# manually via the Actions tab.
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build exe (PyInstaller one-file)
+        run: python -m PyInstaller -F -w -n WooTalkBot wootalk_app.py
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/WooTalkBot.exe
+          fail_on_unmatched_files: false
+          body: |
+            ## ${{ github.ref_name }}
+
+            ## 使用方式
+
+            下載 `WooTalkBot.exe` 雙擊執行即可（免安裝，不需要 Python）。
+
+            - 封鎖字：逗號分隔，對方前 3 句命中就自動離開換人
+            - 自動第一句：配對成功後自動送出
+            - 點「▶ 開始配對」開始，「■ 停止」結束
+
+            ## 下載
