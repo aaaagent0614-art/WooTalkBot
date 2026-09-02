@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""WooTalk 自動化 — Windows 桌面版（可自動配對 + 手動聊天）。
+"""WooTalk 自動化 — Windows 桌面版（CustomTkinter + 可自動配對 + 手動聊天）。
 
-單一檔案，Python 標準庫(Tkinter) + websockets 即可跑：
-    pip install websockets
+依賴：websockets, customtkinter
+    pip install websockets customtkinter
     python wootalk_app.py
 
 打包 exe：
@@ -15,23 +15,18 @@ import json
 import queue
 import random
 import threading
-import tkinter as tk
 import urllib.request
-from tkinter import ttk
+import customtkinter as ctk
 
 import websockets
 
 WSS = "wss://wootalk.today/websocket"
 HOME = "https://wootalk.today/"
 
-# Catppuccin 深色主題
-C = {
-    "bg": "#1e1e2e", "panel": "#181825", "field": "#313244",
-    "fg": "#cdd6f4", "muted": "#6c7086",
-    "me": "#89b4fa", "them": "#a6e3a1", "system": "#6c7086",
-    "match": "#f9e2af", "leave": "#f38ba8", "accent": "#4caf50",
-    "accent_off": "#f44336",
-}
+FONT = "Microsoft JhengHei UI"
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
 
 def fresh_session():
@@ -47,7 +42,7 @@ def fresh_session():
 
 class WooCore:
     """wootalk 連線邏輯，跑在獨立 thread 的 asyncio loop。
-    事件用 (kind, text) 拋回 GUI；kind ∈ system/me/them/match/leave。"""
+    事件用 (kind, text) 拋回 GUI；kind ∈ system/me/them/match/leave/verify。"""
 
     def __init__(self):
         self.log_q = queue.Queue()
@@ -56,20 +51,29 @@ class WooCore:
         self.ws = None
         self.running = False
         self.matched = False
+
+        # 設定
         self.ban = ["男", "女"]
         self.first = "安安你好"
+        self.match_mode = "contains"   # contains | exact
         self.max_check = 3
+        self.leave_delay_max = 5.0     # 命中封鎖字後，1~x 秒隨機延遲再離開
+
+        # 執行期
         self.round = 0
         self.their_msgs = 0
         self.sent_first = False
         self.msg_id = 0
 
     # ---- GUI 端控制 ----
-    def start(self, ban, first):
+    def start(self, settings: dict):
         if self.running:
             return
-        self.ban = ban
-        self.first = first
+        self.ban = settings.get("ban", [])
+        self.first = settings.get("first", "")
+        self.match_mode = settings.get("match_mode", "contains")
+        self.max_check = int(settings.get("max_check", 3))
+        self.leave_delay_max = max(1.0, float(settings.get("leave_delay_max", 5.0)))
         self.round = 0
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -126,6 +130,11 @@ class WooCore:
     def _rid(self):
         return random.randint(100000, 999999)
 
+    def _hit(self, text, kw):
+        if self.match_mode == "exact":
+            return text.strip() == kw.strip()
+        return kw in text
+
     async def _send(self, name, data=None):
         frame = [name, {"id": self._rid(), "data": data}] if data is not None else [name, {}]
         await self.ws.send(json.dumps(frame, ensure_ascii=False))
@@ -133,6 +142,14 @@ class WooCore:
     async def _say(self, text):
         self.msg_id += 1
         await self._send("new_message", {"message": text, "msg_id": self.msg_id})
+
+    async def _leave_and_reconnect(self, reason):
+        self.matched = False
+        delay = random.uniform(1.0, self.leave_delay_max)
+        self.log(("system", f"{reason}（{delay:.1f} 秒後離開）"))
+        await asyncio.sleep(delay)
+        await self._send("change_person")
+        await self.ws.close()
 
     async def _handle(self, ev):
         name = ev[0]
@@ -152,6 +169,14 @@ class WooCore:
                 if sender == 1:
                     continue
                 if sender == 0:
+                    if "要繼續使用" in text:
+                        self.log(("verify", "🚫 觸發 wootalk 防機器人驗證"))
+                        self.log(("system", "需要手動在瀏覽器勾選「我不是機器人」並等 60 秒"))
+                        self.log(("system", "60 秒後自動重連…"))
+                        self.matched = False
+                        await asyncio.sleep(60)
+                        await self.ws.close()
+                        return
                     if status == "chat_started" and not self.sent_first:
                         self.sent_first = True
                         self.matched = True
@@ -161,20 +186,15 @@ class WooCore:
                             await self._say(self.first)
                             self.log(("me", self.first))
                     elif status == "chat_otherleave":
-                        self.matched = False
-                        self.log(("leave", "👋 對方離開，換下一個"))
-                        await self._send("change_person")
-                        await self.ws.close()
+                        await self._leave_and_reconnect("👋 對方離開，換下一個")
                         return
                 else:  # 陌生人
                     self.their_msgs += 1
-                    hit = [k for k in self.ban if k and k in text]
+                    hit = [k for k in self.ban if k and self._hit(text, k)]
                     if hit and self.their_msgs <= self.max_check:
                         self.log(("them", text))
-                        self.log(("leave", f"⛔ 前{self.max_check}句命中封鎖字 {hit} → 自動離開"))
-                        self.matched = False
-                        await self._send("change_person")
-                        await self.ws.close()
+                        await self._leave_and_reconnect(
+                            f"⛔ 前{self.max_check}句命中封鎖字 {hit}")
                         return
                     self.log(("them", text))
 
@@ -221,85 +241,118 @@ class WooCore:
 class App:
     def __init__(self, core: WooCore):
         self.core = core
-        self.root = tk.Tk()
+        self.root = ctk.CTk()
         self.root.title("WooTalk")
-        self.root.geometry("600x640")
-        self.root.configure(bg=C["bg"])
+        self.root.geometry("820x600")
+        self.root.minsize(720, 520)
 
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
+        # 左側：設定側邊欄
+        self.side = ctk.CTkFrame(self.root, width=230, corner_radius=0)
+        self.side.pack(side="left", fill="y")
+        self.side.pack_propagate(False)
 
-        # 狀態列
-        self.status = tk.Label(self.root, text="⚪ 未開始", bg=C["bg"], fg=C["muted"],
-                               font=("Segoe UI", 11, "bold"), anchor="w")
-        self.status.pack(fill="x", padx=12, pady=(10, 0))
+        ctk.CTkLabel(self.side, text="設定", font=(FONT, 16, "bold")).pack(anchor="w", padx=16, pady=(16, 8))
 
-        # 對話區
-        self.chat = tk.Text(self.root, bg=C["panel"], fg=C["fg"], bd=0, relief="flat",
-                            font=("Segoe UI", 11), wrap="word", state="disabled",
-                            padx=10, pady=8)
-        self.chat.tag_configure("me", foreground=C["me"])
-        self.chat.tag_configure("them", foreground=C["them"])
-        self.chat.tag_configure("system", foreground=C["system"])
-        self.chat.tag_configure("match", foreground=C["match"])
-        self.chat.tag_configure("leave", foreground=C["leave"])
-        self.chat.pack(fill="both", expand=True, padx=12, pady=(6, 6))
+        ctk.CTkLabel(self.side, text="封鎖字（逗號分隔）", font=(FONT, 12),
+                     text_color="#8a8a9e").pack(anchor="w", padx=16)
+        self.ban_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="男,女")
+        self.ban_entry.pack(fill="x", padx=16, pady=(2, 10))
+        self.ban_entry.insert(0, "男,女")
 
-        # 輸入列
-        inp = tk.Frame(self.root, bg=C["bg"])
-        inp.pack(fill="x", padx=12)
-        self.entry = tk.Entry(inp, bg=C["field"], fg=C["fg"], insertbackground=C["fg"],
-                              relief="flat", font=("Segoe UI", 11))
-        self.entry.pack(side="left", fill="x", expand=True, ipady=7)
+        ctk.CTkLabel(self.side, text="封鎖字比對方式", font=(FONT, 12),
+                     text_color="#8a8a9e").pack(anchor="w", padx=16)
+        self.match_menu = ctk.CTkOptionMenu(self.side, values=["包含字", "完全相同"],
+                                            font=(FONT, 13))
+        self.match_menu.pack(fill="x", padx=16, pady=(2, 10))
+
+        ctk.CTkLabel(self.side, text="前幾句內偵測（0=不限）", font=(FONT, 12),
+                     text_color="#8a8a9e").pack(anchor="w", padx=16)
+        self.max_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="3")
+        self.max_entry.pack(fill="x", padx=16, pady=(2, 10))
+        self.max_entry.insert(0, "3")
+
+        ctk.CTkLabel(self.side, text="離開延遲上限（秒，1~x 隨機）", font=(FONT, 12),
+                     text_color="#8a8a9e").pack(anchor="w", padx=16)
+        self.delay_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="5")
+        self.delay_entry.pack(fill="x", padx=16, pady=(2, 10))
+        self.delay_entry.insert(0, "5")
+
+        ctk.CTkLabel(self.side, text="自動第一句（留空=不發）", font=(FONT, 12),
+                     text_color="#8a8a9e").pack(anchor="w", padx=16)
+        self.first_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="安安你好")
+        self.first_entry.pack(fill="x", padx=16, pady=(2, 10))
+        self.first_entry.insert(0, "安安你好")
+
+        self.btn = ctk.CTkButton(self.side, text="▶ 開始配對", command=self.toggle,
+                                 font=(FONT, 14, "bold"), height=40,
+                                 fg_color="#4caf50", hover_color="#43a047")
+        self.btn.pack(side="bottom", fill="x", padx=16, pady=16)
+
+        # 右側：主區
+        main = ctk.CTkFrame(self.root, corner_radius=0)
+        main.pack(side="left", fill="both", expand=True)
+
+        self.status = ctk.CTkLabel(main, text="⚪ 未開始", font=(FONT, 13, "bold"),
+                                   text_color="#8a8a9e", anchor="w")
+        self.status.pack(fill="x", padx=14, pady=(12, 4))
+
+        self.chat = ctk.CTkTextbox(main, font=(FONT, 13), wrap="word")
+        self.chat.pack(fill="both", expand=True, padx=14, pady=(4, 6))
+        self.chat._textbox.tag_config("me", foreground="#8ab4f8")
+        self.chat._textbox.tag_config("them", foreground="#81c995")
+        self.chat._textbox.tag_config("system", foreground="#8a8a9e")
+        self.chat._textbox.tag_config("match", foreground="#fdd663")
+        self.chat._textbox.tag_config("leave", foreground="#f28b82")
+        self.chat._textbox.tag_config("verify", foreground="#f28b82")
+
+        inp = ctk.CTkFrame(main, corner_radius=0, fg_color="transparent")
+        inp.pack(fill="x", padx=14, pady=(0, 14))
+        self.entry = ctk.CTkEntry(inp, font=(FONT, 13), placeholder_text="輸入訊息，Enter 送出")
+        self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda e: self.send())
-        tk.Button(inp, text="送出", command=self.send, bg=C["me"], fg="#11111b",
-                  relief="flat", font=("Segoe UI", 10, "bold"), padx=16, pady=7,
-                  activebackground=C["me"]).pack(side="left", padx=(8, 0))
-
-        # 設定列
-        cfg = tk.Frame(self.root, bg=C["bg"])
-        cfg.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Label(cfg, text="封鎖字", bg=C["bg"], fg=C["muted"], font=("Segoe UI", 9)).pack(side="left")
-        self.ban_var = tk.StringVar(value="男,女")
-        tk.Entry(cfg, textvariable=self.ban_var, width=14, bg=C["field"], fg=C["fg"],
-                 insertbackground=C["fg"], relief="flat").pack(side="left", padx=(4, 12))
-        tk.Label(cfg, text="首句", bg=C["bg"], fg=C["muted"], font=("Segoe UI", 9)).pack(side="left")
-        self.first_var = tk.StringVar(value="安安你好")
-        tk.Entry(cfg, textvariable=self.first_var, bg=C["field"], fg=C["fg"],
-                 insertbackground=C["fg"], relief="flat").pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        # 開始/停止
-        self.btn = tk.Button(self.root, text="▶ 開始配對", command=self.toggle,
-                             bg=C["accent"], fg="#11111b", relief="flat",
-                             font=("Segoe UI", 12, "bold"), pady=8,
-                             activebackground=C["accent"])
-        self.btn.pack(fill="x", padx=12, pady=(8, 12))
+        ctk.CTkButton(inp, text="送出", command=self.send, width=70,
+                      font=(FONT, 13, "bold")).pack(side="left", padx=(8, 0))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(100, self._poll)
 
     def append(self, kind, text):
-        prefix = {"me": "[我] ", "them": "[對方] ", "system": "", "match": "", "leave": ""}[kind]
-        self.chat.config(state="normal")
+        prefix = {"me": "[我] ", "them": "[對方] ", "system": "", "match": "",
+                  "leave": "", "verify": ""}[kind]
+        self.chat.configure(state="normal")
         self.chat.insert("end", prefix + text + "\n", kind)
         self.chat.see("end")
-        self.chat.config(state="disabled")
+        self.chat.configure(state="disabled")
 
     def send(self):
         self.core.send_chat(self.entry.get())
         self.entry.delete(0, "end")
 
+    def _read_settings(self):
+        ban = [x.strip() for x in self.ban_entry.get().replace("，", ",").split(",") if x.strip()]
+        try:
+            max_check = int(self.max_entry.get() or "3")
+        except ValueError:
+            max_check = 3
+        try:
+            delay = float(self.delay_entry.get() or "5")
+        except ValueError:
+            delay = 5.0
+        return {
+            "ban": ban,
+            "first": self.first_entry.get().strip(),
+            "match_mode": "exact" if self.match_menu.get() == "完全相同" else "contains",
+            "max_check": max_check,
+            "leave_delay_max": delay,
+        }
+
     def toggle(self):
         if self.core.running:
             self.core.stop()
-            self.btn.config(text="▶ 開始配對", bg=C["accent"])
+            self.btn.configure(text="▶ 開始配對", fg_color="#4caf50", hover_color="#43a047")
         else:
-            ban = [x.strip() for x in self.ban_var.get().replace("，", ",").split(",") if x.strip()]
-            self.core.start(ban, self.first_var.get().strip())
-            self.btn.config(text="■ 停止", bg=C["accent_off"])
+            self.core.start(self._read_settings())
+            self.btn.configure(text="■ 停止", fg_color="#f44336", hover_color="#d32f2f")
 
     def _poll(self):
         while True:
@@ -311,15 +364,15 @@ class App:
 
         if self.core.running:
             if self.core.matched:
-                self.status.config(text="🟢 已配對，可以聊天", fg=C["them"])
+                self.status.configure(text="🟢 已配對，可以聊天", text_color="#81c995")
             else:
-                self.status.config(text="🟡 配對中…", fg=C["match"])
-            if self.btn["text"] != "■ 停止":
-                self.btn.config(text="■ 停止", bg=C["accent_off"])
+                self.status.configure(text="🟡 配對中…", text_color="#fdd663")
+            if self.btn.cget("text") != "■ 停止":
+                self.btn.configure(text="■ 停止", fg_color="#f44336", hover_color="#d32f2f")
         else:
-            if self.btn["text"] != "▶ 開始配對":
-                self.btn.config(text="▶ 開始配對", bg=C["accent"])
-                self.status.config(text="🔴 已停止", fg=C["muted"])
+            if self.btn.cget("text") != "▶ 開始配對":
+                self.btn.configure(text="▶ 開始配對", fg_color="#4caf50", hover_color="#43a047")
+                self.status.configure(text="🔴 已停止", text_color="#8a8a9e")
         self.root.after(100, self._poll)
 
     def on_close(self):

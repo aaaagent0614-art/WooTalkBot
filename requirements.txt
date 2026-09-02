@@ -1,1 +1,2 @@
 websockets>=17.0
+customtkinter>=6.0
