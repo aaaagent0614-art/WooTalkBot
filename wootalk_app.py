@@ -12,10 +12,14 @@
 import asyncio
 import http.cookiejar
 import json
+import os
 import queue
 import random
+import re
+import sys
 import threading
 import urllib.request
+import webbrowser
 import customtkinter as ctk
 
 import websockets
@@ -38,6 +42,38 @@ def fresh_session():
         if c.name == "_wootalk_session":
             return c.value
     return None
+
+
+def config_path():
+    if getattr(sys, "frozen", False):            # PyInstaller 打包後
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "wootalk_config.json")
+
+
+def load_config():
+    try:
+        with open(config_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    try:
+        with open(config_path(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _fmt_num(x):
+    try:
+        n = float(x)
+        return str(int(n)) if n == int(n) else str(n)
+    except Exception:
+        return str(x)
 
 
 class WooCore:
@@ -170,9 +206,18 @@ class WooCore:
                     continue
                 if sender == 0:
                     if "要繼續使用" in text:
+                        m = re.search(r"https://wootalk\.today/verify/[a-zA-Z0-9-]+", text)
+                        url = m.group(0) if m else None
                         self.log(("verify", "🚫 觸發 wootalk 防機器人驗證"))
-                        self.log(("system", "需要手動在瀏覽器勾選「我不是機器人」並等 60 秒"))
-                        self.log(("system", "60 秒後自動重連…"))
+                        if url:
+                            self.log(("verify", f"驗證連結：{url}"))
+                            try:
+                                webbrowser.open(url)
+                                self.log(("system", "已自動開瀏覽器，勾選「我不是機器人」後等倒數完成"))
+                            except Exception:
+                                self.log(("system", "請手動複製上面的連結開瀏覽器"))
+                        else:
+                            self.log(("system", "（找不到驗證連結，請等 60 秒重連）"))
                         self.matched = False
                         await asyncio.sleep(60)
                         await self.ws.close()
@@ -251,37 +296,40 @@ class App:
         self.side.pack(side="left", fill="y")
         self.side.pack_propagate(False)
 
+        cfg = load_config()
+
         ctk.CTkLabel(self.side, text="設定", font=(FONT, 16, "bold")).pack(anchor="w", padx=16, pady=(16, 8))
 
         ctk.CTkLabel(self.side, text="封鎖字（逗號分隔）", font=(FONT, 12),
                      text_color="#8a8a9e").pack(anchor="w", padx=16)
         self.ban_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="男,女")
         self.ban_entry.pack(fill="x", padx=16, pady=(2, 10))
-        self.ban_entry.insert(0, "男,女")
+        self.ban_entry.insert(0, ",".join(cfg.get("ban", ["男", "女"])))
 
         ctk.CTkLabel(self.side, text="封鎖字比對方式", font=(FONT, 12),
                      text_color="#8a8a9e").pack(anchor="w", padx=16)
         self.match_menu = ctk.CTkOptionMenu(self.side, values=["包含字", "完全相同"],
                                             font=(FONT, 13))
         self.match_menu.pack(fill="x", padx=16, pady=(2, 10))
+        self.match_menu.set("完全相同" if cfg.get("match_mode") == "exact" else "包含字")
 
         ctk.CTkLabel(self.side, text="前幾句內偵測（0=不限）", font=(FONT, 12),
                      text_color="#8a8a9e").pack(anchor="w", padx=16)
         self.max_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="3")
         self.max_entry.pack(fill="x", padx=16, pady=(2, 10))
-        self.max_entry.insert(0, "3")
+        self.max_entry.insert(0, _fmt_num(cfg.get("max_check", 3)))
 
         ctk.CTkLabel(self.side, text="離開延遲上限（秒，1~x 隨機）", font=(FONT, 12),
                      text_color="#8a8a9e").pack(anchor="w", padx=16)
         self.delay_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="5")
         self.delay_entry.pack(fill="x", padx=16, pady=(2, 10))
-        self.delay_entry.insert(0, "5")
+        self.delay_entry.insert(0, _fmt_num(cfg.get("leave_delay_max", 5)))
 
         ctk.CTkLabel(self.side, text="自動第一句（留空=不發）", font=(FONT, 12),
                      text_color="#8a8a9e").pack(anchor="w", padx=16)
         self.first_entry = ctk.CTkEntry(self.side, font=(FONT, 13), placeholder_text="安安你好")
         self.first_entry.pack(fill="x", padx=16, pady=(2, 10))
-        self.first_entry.insert(0, "安安你好")
+        self.first_entry.insert(0, cfg.get("first", "安安你好"))
 
         self.btn = ctk.CTkButton(self.side, text="▶ 開始配對", command=self.toggle,
                                  font=(FONT, 14, "bold"), height=40,
@@ -351,7 +399,9 @@ class App:
             self.core.stop()
             self.btn.configure(text="▶ 開始配對", fg_color="#4caf50", hover_color="#43a047")
         else:
-            self.core.start(self._read_settings())
+            settings = self._read_settings()
+            save_config(settings)
+            self.core.start(settings)
             self.btn.configure(text="■ 停止", fg_color="#f44336", hover_color="#d32f2f")
 
     def _poll(self):
