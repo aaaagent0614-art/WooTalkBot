@@ -213,13 +213,13 @@ class WooCore:
                             self.log(("verify", f"驗證連結：{url}"))
                             try:
                                 webbrowser.open(url)
-                                self.log(("system", "已自動開瀏覽器，勾選「我不是機器人」後等倒數完成"))
+                                self.log(("system", "已自動開瀏覽器"))
                             except Exception:
                                 self.log(("system", "請手動複製上面的連結開瀏覽器"))
-                        else:
-                            self.log(("system", "（找不到驗證連結，請等 60 秒重連）"))
+                        self.log(("system", "驗證流程：勾我不是機器人 → 等倒數 → 按我同意 → 回原分頁重整"))
+                        self.log(("system", "⏸ 配對已暫停。驗證完成後，回 app 按「▶ 開始配對」繼續"))
                         self.matched = False
-                        await asyncio.sleep(60)
+                        self.running = False          # 完全停止，不再自動重連
                         await self.ws.close()
                         return
                     if status == "chat_started" and not self.sent_first:
