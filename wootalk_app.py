@@ -100,6 +100,7 @@ class WooCore:
         self.their_msgs = 0
         self.sent_first = False
         self.msg_id = 0
+        self.session = None
 
     # ---- GUI 端控制 ----
     def start(self, settings: dict):
@@ -110,6 +111,7 @@ class WooCore:
         self.match_mode = settings.get("match_mode", "contains")
         self.max_check = int(settings.get("max_check", 3))
         self.leave_delay_max = max(1.0, float(settings.get("leave_delay_max", 5.0)))
+        self.session = fresh_session()          # 啟動時拿一次，之後復用（模擬正常瀏覽器）
         self.round = 0
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -245,7 +247,8 @@ class WooCore:
                     self.log(("them", text))
 
     async def _round(self):
-        sess = fresh_session()
+        sess = self.session or fresh_session()
+        self.session = sess
         if not sess:
             self.log(("system", "⚠️ 拿不到 session cookie，稍後重試"))
             return
