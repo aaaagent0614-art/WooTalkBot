@@ -127,6 +127,14 @@ class WooCore:
         if self.loop:
             self.loop.call_soon_threadsafe(self._close_ws)
 
+    def leave(self):
+        """離開目前對話並繼續自動配對（等同網頁版「離開」）。"""
+        if not self.running:
+            self.log(("system", "⚠️ 還沒開始配對"))
+            return
+        if self.loop:
+            self.loop.call_soon_threadsafe(self._user_leave)
+
     def send_chat(self, text):
         text = (text or "").strip()
         if not text:
@@ -155,6 +163,24 @@ class WooCore:
                 self.ws.close()
             except Exception:
                 pass
+
+    def _user_leave(self):
+        if self.matched:
+            self.log(("leave", "👋 已離開對話，自動配對下一個…"))
+        else:
+            self.log(("system", "⇄ 取消本次配對，重新開始…"))
+        self.matched = False
+        asyncio.ensure_future(self._do_user_leave())
+
+    async def _do_user_leave(self):
+        try:
+            await self._send("change_person")
+        except Exception:
+            pass
+        try:
+            await self.ws.close()
+        except Exception:
+            pass
 
     def _queue_send(self, text):
         asyncio.ensure_future(self._do_send(text))
@@ -232,7 +258,7 @@ class WooCore:
                         self.sent_first = True
                         self.matched = True
                         self.log(("match", "✅ 已配對，可以開始聊天"))
-                        await asyncio.sleep(0.4)
+                        await asyncio.sleep(random.uniform(0, 3))  # 像真人先讀一下再回
                         if self.first:
                             await self._say(self.first)
                             self.log(("me", self.first))
@@ -326,7 +352,7 @@ class WooCore:
                 raise
             except Exception as e:
                 self.log(("system", f"⚠️ {type(e).__name__}: {e}"))
-            await asyncio.sleep(2)
+            await asyncio.sleep(random.uniform(0, 3))  # 重新配對前隨機延遲
         self.matched = False
         self.log(("system", "⏸ 已停止"))
 
@@ -388,9 +414,15 @@ class App:
         main = ctk.CTkFrame(self.root, corner_radius=0)
         main.pack(side="left", fill="both", expand=True)
 
-        self.status = ctk.CTkLabel(main, text="⚪ 未開始", font=(FONT, 13, "bold"),
+        top = ctk.CTkFrame(main, fg_color="transparent")
+        top.pack(fill="x", padx=14, pady=(12, 4))
+        self.status = ctk.CTkLabel(top, text="⚪ 未開始", font=(FONT, 13, "bold"),
                                    text_color="#8a8a9e", anchor="w")
-        self.status.pack(fill="x", padx=14, pady=(12, 4))
+        self.status.pack(side="left")
+        self.leave_btn = ctk.CTkButton(top, text="⇄ 離開對話", width=110, height=28,
+                                       font=(FONT, 12, "bold"),
+                                       command=self.leave, state="disabled")
+        self.leave_btn.pack(side="right")
 
         self.chat = ctk.CTkTextbox(main, font=(FONT, 13), wrap="word")
         self.chat.pack(fill="both", expand=True, padx=14, pady=(4, 6))
@@ -423,6 +455,9 @@ class App:
     def send(self):
         self.core.send_chat(self.entry.get())
         self.entry.delete(0, "end")
+
+    def leave(self):
+        self.core.leave()
 
     def _read_settings(self):
         ban = [x.strip() for x in self.ban_entry.get().replace("，", ",").split(",") if x.strip()]
@@ -463,14 +498,17 @@ class App:
         if self.core.running:
             if self.core.matched:
                 self.status.configure(text="🟢 已配對，可以聊天", text_color="#81c995")
+                self.leave_btn.configure(state="normal")
             else:
                 self.status.configure(text="🟡 配對中…", text_color="#fdd663")
+                self.leave_btn.configure(state="disabled")
             if self.btn.cget("text") != "■ 停止":
                 self.btn.configure(text="■ 停止", fg_color="#f44336", hover_color="#d32f2f")
         else:
             if self.btn.cget("text") != "▶ 開始配對":
                 self.btn.configure(text="▶ 開始配對", fg_color="#4caf50", hover_color="#43a047")
                 self.status.configure(text="🔴 已停止", text_color="#8a8a9e")
+            self.leave_btn.configure(state="disabled")
         self.root.after(100, self._poll)
 
     def on_close(self):
