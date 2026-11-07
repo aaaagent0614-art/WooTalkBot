@@ -26,15 +26,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Smoke test (syntax)
+        run: python -m py_compile wootalk_app.py
+
       - name: Build exe (PyInstaller one-file)
         run: python -m PyInstaller -F -w -n WooTalkBot wootalk_app.py
+
+      - name: Upload exe artifact (manual / non-tag runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: WooTalkBot-exe
+          path: dist/WooTalkBot.exe
+          if-no-files-found: error
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/WooTalkBot.exe
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           body: |
             ## ${{ github.ref_name }}
 

@@ -17,6 +17,6 @@ WooTalk 自動化桌面工具。Windows 免安裝，雙擊 `WooTalkBot.exe` 即�
 ## 從原始碼執行
 
 ```
-pip install websockets
+pip install -r requirements.txt
 python wootalk_app.py
 ```

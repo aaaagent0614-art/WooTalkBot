@@ -5,3 +5,11 @@ build/
 *.spec
 .venv/
 tgbot.py
+# 本機實驗腳本與執行期產物（不放進 repo；要留的都在 ~/wootalk-lab/）
+/probe*.py
+/exp_*.py
+/smoke*.py
+/test_*.py
+/bot.py
+/wootalk_config.json
+/wootalk_error.log

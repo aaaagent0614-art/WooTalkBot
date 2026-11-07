@@ -2,7 +2,7 @@
 """WooTalk 自動化 — Windows 桌面版（CustomTkinter + 可自動配對 + 手動聊天）。
 
 依賴：websockets, customtkinter
-    pip install websockets customtkinter
+    pip install -r requirements.txt
     python wootalk_app.py
 
 打包 exe：
@@ -23,6 +23,8 @@ import time
 import traceback
 import urllib.request
 import webbrowser
+import tkinter as tk
+
 import customtkinter as ctk
 
 import websockets
@@ -30,7 +32,13 @@ import websockets
 WSS = "wss://wootalk.today/websocket"
 HOME = "https://wootalk.today/"
 
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.3.0"
+
+# 一般 Chrome 的 UA：websockets 預設會送 "Python/3.11 websockets/17.1"，那是免費的機器人特徵
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+CHAT_MAX_LINES = 2000          # 對話框保留行數上限（掛整晚不會無限長）
 
 FONT = "Microsoft JhengHei UI"
 
@@ -112,18 +120,28 @@ def install_excepthook():
     threading.excepthook = _thread_excepthook
 
 
-def fresh_session():
+def _fetch_session(timeout=10):
+    """首頁 GET 拿 _wootalk_session cookie；拿不到（網站掛了/維護中）回 None。
+
+    fresh_session() 與 _http_check() 共用這一份，改 UA/逾時只會改到一處。
+    """
     cj = http.cookiejar.CookieJar()
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-    op.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")]
+    op.addheaders = [("User-Agent", UA),
+                     ("Accept-Language", "zh-TW,zh;q=0.9,en;q=0.8"),
+                     ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")]
     try:
-        op.open(HOME, timeout=10)
+        op.open(HOME, timeout=timeout)
     except Exception:
         return None
     for c in cj:
         if c.name == "_wootalk_session":
             return c.value
     return None
+
+
+def fresh_session():
+    return _fetch_session()
 
 
 def config_path():
@@ -143,11 +161,31 @@ def load_config():
 
 
 def save_config(cfg):
+    """寫設定檔；成功 True，唯讀資料夾等失敗回 False（GUI 要提示，不要靜默）。"""
     try:
         with open(config_path(), "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
     except Exception:
-        pass
+        return False
+
+
+def _clamp_int(raw, default, lo, hi):
+    """輸入框字串 → int，非數字用 default，最後夾在 lo~hi。"""
+    try:
+        v = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(v, hi))
+
+
+def _clamp_float(raw, default, lo, hi):
+    """輸入框字串 → float，非數字用 default，最後夾在 lo~hi。"""
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(float(v), hi))
 
 
 def _fmt_num(x):
@@ -198,7 +236,7 @@ class WooCore:
         self.first = settings.get("first", "")
         self.match_mode = settings.get("match_mode", "contains")
         self.max_check = int(settings.get("max_check", 3))
-        self.leave_delay_max = max(1.0, float(settings.get("leave_delay_max", 5.0)))
+        self.leave_delay_max = max(1.0, min(30.0, float(settings.get("leave_delay_max", 5.0))))
         self.session = None          # 在背景 thread 裡第一次拿，避免 HTTP 阻塞 GUI
         self.round = 0
         self.fails = 0
@@ -474,17 +512,7 @@ class WooCore:
     def _http_check(self):
         """檢查 wootalk 是否正常：能拿到 _wootalk_session cookie 就代表正常。
         維護中時 wootalk 回維護頁、不發 session cookie（實測確認）。"""
-        cj = http.cookiejar.CookieJar()
-        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-        op.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")]
-        try:
-            op.open(HOME, timeout=10)
-        except Exception:
-            return "down"
-        for c in cj:
-            if c.name == "_wootalk_session":
-                return "up"
-        return "down"
+        return "up" if _fetch_session() else "down"
 
     async def _match_timeout(self, seconds):
         """配對超過 seconds 秒仍無結果 → 檢查網站狀態。"""
@@ -496,12 +524,12 @@ class WooCore:
             return
         status = await asyncio.to_thread(self._http_check)
         if status == "down":
-            self.log(("leave", "⚠️ wootalk 網站疑似掛了（配對超過 10 秒無回應）"))
+            self.log(("leave", f"⚠️ wootalk 網站疑似掛了（配對超過 {seconds:.0f} 秒無回應）"))
             self.log(("system", "已停止配對。等網站恢復後再按「▶ 開始配對」"))
             self.running = False
             await self._aclose()
         else:
-            self.log(("system", "🔎 配對超過 10 秒，網站正常（可能人少），繼續等待…"))
+            self.log(("system", f"🔎 配對超過 {seconds:.0f} 秒，網站正常（可能人少），繼續等待…"))
 
     async def _round(self):
         sess = self.session or fresh_session()
@@ -512,10 +540,15 @@ class WooCore:
             self.running = False
             return
         headers = {"Origin": HOME.rstrip("/"), "Cookie": f"_wootalk_session={sess}"}
-        async with websockets.connect(WSS, origin=HOME.rstrip("/"),
+        # Origin 只在 additional_headers 給一次（同時傳 origin= 會送兩個 Origin，
+        # 一般 Chrome 不會這樣，嚴格一點的伺服器直接 400）
+        async with websockets.connect(WSS, user_agent_header=UA,
                                       additional_headers=headers) as ws:
             self.ws = ws
-            timeout_task = asyncio.create_task(self._match_timeout(10))
+            # 只在「按開始後的第一輪」檢查一次網站狀態（拉到 60 秒）；
+            # 正常等配對常常超過 10 秒，每輪多打一次首頁等於多開一個匿名訪客。
+            timeout_task = (asyncio.create_task(self._match_timeout(60))
+                            if self.round == 1 else None)
             try:
                 async for raw in ws:
                     if not self.running:
@@ -529,7 +562,8 @@ class WooCore:
                     for ev in evs:
                         await self._handle(ev)
             finally:
-                timeout_task.cancel()
+                if timeout_task is not None:
+                    timeout_task.cancel()
 
     def _backoff_delay(self):
         """連續連線失敗 → 指數退避（上限 60s）＋ jitter；成功後回到 0~3s。"""
@@ -575,7 +609,7 @@ class App:
     def __init__(self, core: WooCore):
         self.core = core
         self.root = ctk.CTk()
-        self.root.title("WooTalk")
+        self.root.title(f"WooTalk v{APP_VERSION}")
         self.root.geometry("820x600")
         self.root.minsize(720, 520)
 
@@ -646,6 +680,11 @@ class App:
         self.chat._textbox.tag_config("match", foreground="#fdd663")
         self.chat._textbox.tag_config("leave", foreground="#f28b82")
         self.chat._textbox.tag_config("verify", foreground="#f28b82")
+        # 唯讀但要能複製：右鍵選單（禁用狀態的 Text 仍可用滑鼠選取）
+        self._chat_menu = tk.Menu(self.root, tearoff=0)
+        self._chat_menu.add_command(label="複製選取", command=self._copy_selection)
+        self._chat_menu.add_command(label="複製全部", command=self._copy_all)
+        self.chat._textbox.bind("<Button-3>", self._popup_chat_menu)
 
         inp = ctk.CTkFrame(main, corner_radius=0, fg_color="transparent")
         inp.pack(fill="x", padx=14, pady=(0, 14))
@@ -661,10 +700,37 @@ class App:
     def append(self, kind, text):
         prefix = {"me": "[我] ", "them": "[對方] ", "system": "", "match": "",
                   "leave": "", "verify": ""}[kind]
+        stamp = time.strftime("[%H:%M] ")
         self.chat.configure(state="normal")
-        self.chat.insert("end", prefix + text + "\n", kind)
+        self.chat.insert("end", stamp + prefix + text + "\n", kind)
+        self._trim_chat()
         self.chat.see("end")
         self.chat.configure(state="disabled")
+
+    def _trim_chat(self):
+        """超過 CHAT_MAX_LINES 行就刪掉最舊的（掛整晚不會無限長、捲動不會變鈍）。"""
+        last = int(self.chat.index("end-1c").split(".")[0])
+        excess = last - CHAT_MAX_LINES
+        if excess > 0:
+            self.chat.delete("1.0", f"{excess + 1}.0")
+
+    def _popup_chat_menu(self, event):
+        self._chat_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _clipboard(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text or "")
+
+    def _copy_selection(self):
+        try:
+            text = self.chat._textbox.get("sel.first", "sel.last")
+        except tk.TclError:                       # 沒選取任何字
+            text = ""
+        self._clipboard(text)
+
+    def _copy_all(self):
+        self._clipboard(self.chat.get("1.0", "end-1c"))
 
     def send(self):
         self.core.send_chat(self.entry.get())
@@ -675,14 +741,11 @@ class App:
 
     def _read_settings(self):
         ban = [x.strip() for x in self.ban_entry.get().replace("，", ",").split(",") if x.strip()]
-        try:
-            max_check = int(self.max_entry.get() or "3")
-        except ValueError:
-            max_check = 3
-        try:
-            delay = float(self.delay_entry.get() or "5")
-        except ValueError:
-            delay = 5.0
+        max_check = _clamp_int(self.max_entry.get(), 3, 0, 50)
+        delay = _clamp_float(self.delay_entry.get(), 5.0, 1.0, 30.0)
+        # 把修正後的值寫回輸入框，使用者才看得到實際生效的設定
+        self._set_entry(self.max_entry, str(max_check))
+        self._set_entry(self.delay_entry, _fmt_num(delay))
         return {
             "ban": ban,
             "first": self.first_entry.get().strip(),
@@ -691,13 +754,22 @@ class App:
             "leave_delay_max": delay,
         }
 
+    @staticmethod
+    def _set_entry(entry, value):
+        entry.delete(0, "end")
+        entry.insert(0, value)
+
     def toggle(self):
-        if self.core.running:
+        # 用按鈕文字判斷：core.running 是背景 thread 改的，_poll 最多晚 100ms 才更新，
+        # 那段空窗用 core.running 判斷會「按停止反而又開始」
+        if self.btn.cget("text") == "■ 停止":
             self.core.stop()
             self.btn.configure(text="▶ 開始配對", fg_color="#4caf50", hover_color="#43a047")
+            self.status.configure(text="🔴 已停止", text_color="#8a8a9e")
         else:
             settings = self._read_settings()
-            save_config(settings)
+            if not save_config(settings):
+                self.append("system", "⚠️ 設定存檔失敗（資料夾不可寫），本次仍會用目前設定")
             self.core.start(settings)
             self.btn.configure(text="■ 停止", fg_color="#f44336", hover_color="#d32f2f")
 
@@ -727,6 +799,9 @@ class App:
 
     def on_close(self):
         self.core.stop()
+        t = self.core.thread
+        if t is not None and t.is_alive():
+            t.join(0.5)              # 多等 0.5s 讓 close frame 真的送出去，別讓程序硬殺 thread
         self.root.destroy()
 
     def run(self):
